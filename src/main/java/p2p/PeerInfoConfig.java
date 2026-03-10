@@ -3,32 +3,17 @@ package p2p;
 import java.io.*;
 import java.util.*;
 
-/**
- * PeerInfoConfig reads and parses the PeerInfo.cfg file containing
- * information about all peers in the P2P network.
- */
+// reads and stores peer info from PeerInfo.cfg
 public class PeerInfoConfig {
     
     private List<PeerInfo> peers;
     
-    /**
-     * Constructor that loads peer information from the specified file.
-     * @param configFilePath Path to the PeerInfo.cfg file
-     * @throws IOException if file cannot be read or parsed
-     */
     public PeerInfoConfig(String configFilePath) throws IOException {
         peers = new ArrayList<>();
         loadConfig(configFilePath);
     }
     
-    /**
-     * Parses the PeerInfo.cfg file and loads peer information.
-     * Expected format (one peer per line):
-     *   peerID hostName port hasFile
-     * Example:
-     *   1001 localhost 6008 1
-     *   1002 localhost 6009 0
-     */
+    // parse PeerInfo.cfg — each line is: peerID hostName port hasFile (e.g. "1001 localhost 6008 1")
     private void loadConfig(String configFilePath) throws IOException {
         BufferedReader reader = new BufferedReader(new FileReader(configFilePath));
         String line;
@@ -63,19 +48,10 @@ public class PeerInfoConfig {
         reader.close();
     }
     
-    /**
-     * Gets the list of all peers.
-     * @return List of PeerInfo objects
-     */
     public List<PeerInfo> getPeers() {
         return new ArrayList<>(peers);
     }
     
-    /**
-     * Finds a peer by its ID.
-     * @param peerId Peer ID to search for
-     * @return PeerInfo object if found, null otherwise
-     */
     public PeerInfo getPeerById(int peerId) {
         for (PeerInfo peer : peers) {
             if (peer.getPeerId() == peerId) {
@@ -85,13 +61,7 @@ public class PeerInfoConfig {
         return null;
     }
     
-    /**
-     * Gets all peers that should be connected to by the specified peer.
-     * According to the protocol, a peer connects only to peers that appear
-     * before it in the configuration file.
-     * @param peerId The peer ID that will initiate connections
-     * @return List of PeerInfo objects representing peers to connect to
-     */
+    // according to the protocol, a peer connects only to peers listed before it in the config
     public List<PeerInfo> getPeersToConnectTo(int peerId) {
         List<PeerInfo> result = new ArrayList<>();
         
@@ -105,10 +75,6 @@ public class PeerInfoConfig {
         return result;
     }
     
-    /**
-     * Gets the total number of peers in the configuration.
-     * @return Number of peers
-     */
     public int getPeerCount() {
         return peers.size();
     }

@@ -6,21 +6,8 @@ import java.util.*;
 import java.util.concurrent.*;
 import java.util.logging.*;
 
-/**
- * peerProcess is the main entry point for the P2P file sharing system.
- * Each peer runs this program with its peer ID as a command-line argument.
- * 
- * Usage: java peerProcess <peerID>
- * 
- * The peer will:
- *   1. Read configuration files (Common.cfg and PeerInfo.cfg)
- *   2. Initialize its state and file manager
- *   3. Start a server socket to accept incoming connections
- *   4. Connect to all peers that appear before it in PeerInfo.cfg
- *   5. Exchange handshakes and bitfields
- *   6. Begin file transfer protocol
- *   7. Start choking/unchoking schedulers
- */
+// main entry point — run with: java peerProcess <peerID>
+// reads configs, starts server, connects to earlier peers, and runs the file sharing protocol
 public class peerProcess {
     
     // Configuration
@@ -52,10 +39,6 @@ public class peerProcess {
     // Logger
     private static Logger logger;
     
-    /**
-     * Constructor for peerProcess.
-     * @param peerId The peer ID for this process
-     */
     public peerProcess(int peerId) {
         this.myPeerId = peerId;
         this.peerConnections = new ConcurrentHashMap<>();
@@ -68,10 +51,7 @@ public class peerProcess {
         setupLogger();
     }
     
-    /**
-     * Sets up the logger for this peer.
-     * Logs are written to log_peer_<peerID>.log
-     */
+    // set up a file logger at log_peer_<peerID>.log
     private void setupLogger() {
         try {
             logger = Logger.getLogger("Peer_" + myPeerId);
@@ -87,9 +67,7 @@ public class peerProcess {
         }
     }
     
-    /**
-     * Loads configuration files.
-     */
+    // load Common.cfg and PeerInfo.cfg
     private void loadConfigurations() throws IOException {
         // Load common configuration
         commonConfig = new CommonConfig(COMMON_CONFIG_FILE);
@@ -108,9 +86,7 @@ public class peerProcess {
         logger.info("My peer info: " + myPeerInfo);
     }
     
-    /**
-     * Initializes the bitfield for this peer.
-     */
+    // set up our bitfield based on whether we start with the file
     private void initializeBitfield() {
         int pieceCount = commonConfig.getPieceCount();
         boolean hasFile = myPeerInfo.hasFile();
@@ -125,9 +101,7 @@ public class peerProcess {
         }
     }
     
-    /**
-     * Starts the server socket to accept incoming connections from other peers.
-     */
+    // open a server socket and spin up a thread to accept incoming connections
     private void startServer() throws IOException {
         serverSocket = new ServerSocket(myPeerInfo.getPort());
         logger.info("Server started on port " + myPeerInfo.getPort());
@@ -151,10 +125,7 @@ public class peerProcess {
         });
     }
     
-    /**
-     * Handles an incoming connection from another peer.
-     * @param socket Socket for the incoming connection
-     */
+    // called when a peer connects to us — do handshake, exchange bitfields, then start messaging
     private void handleIncomingConnection(Socket socket) {
         try {
             DataInputStream in = new DataInputStream(socket.getInputStream());
@@ -188,9 +159,7 @@ public class peerProcess {
         }
     }
     
-    /**
-     * Connects to all peers that appear before this peer in PeerInfo.cfg.
-     */
+    // connect to peers that are listed before us in PeerInfo.cfg
     private void connectToPeers() {
         List<PeerInfo> peersToConnect = peerInfoConfig.getPeersToConnectTo(myPeerId);
         
@@ -201,10 +170,7 @@ public class peerProcess {
         }
     }
     
-    /**
-     * Connects to a specific peer.
-     * @param peerInfo Information about the peer to connect to
-     */
+    // open a TCP connection to a peer, do handshake, exchange bitfields, start messaging
     private void connectToPeer(PeerInfo peerInfo) {
         try {
             // Establish TCP connection
@@ -250,12 +216,7 @@ public class peerProcess {
         }
     }
     
-    /**
-     * Exchanges bitfield messages with a peer.
-     * @param peerId Peer ID to exchange with
-     * @param in Input stream for reading messages
-     * @param out Output stream for sending messages
-     */
+    // send our bitfield, receive theirs, then send INTERESTED or NOT_INTERESTED
     private void exchangeBitfields(int peerId, DataInputStream in, DataOutputStream out) throws IOException {
         // Send my bitfield
         Message bitfieldMessage = Message.createBitfieldMessage(myBitfield.toBytes());
@@ -275,11 +236,7 @@ public class peerProcess {
         }
     }
     
-    /**
-     * Determines if this peer is interested in another peer and sends appropriate message.
-     * @param peerId Peer ID to evaluate
-     * @param out Output stream for sending messages
-     */
+    // check if the peer has anything we need and send INTERESTED / NOT_INTERESTED accordingly
     private void determineAndSendInterest(int peerId, DataOutputStream out) throws IOException {
         Bitfield peerBitfield = peerBitfields.get(peerId);
         
@@ -294,12 +251,7 @@ public class peerProcess {
         }
     }
     
-    /**
-     * Handles incoming messages from a peer.
-     * @param peerId Peer ID
-     * @param in Input stream for reading messages
-     * @param out Output stream for sending messages
-     */
+    // loop that reads and processes messages from a connected peer
     private void handlePeerMessages(int peerId, DataInputStream in, DataOutputStream out) {
         try {
             while (!Thread.currentThread().isInterrupted()) {
@@ -314,12 +266,7 @@ public class peerProcess {
         }
     }
     
-    /**
-     * Processes a received message.
-     * @param peerId Peer ID that sent the message
-     * @param message The received message
-     * @param out Output stream for sending response messages
-     */
+    // dispatch a received message to the appropriate handler logic
     private void processMessage(int peerId, Message message, DataOutputStream out) throws IOException {
         switch (message.getType()) {
             case CHOKE:
@@ -368,9 +315,7 @@ public class peerProcess {
         }
     }
     
-    /**
-     * Starts the peer process.
-     */
+    // kick everything off
     public void start() {
         try {
             logger.info("Starting Peer " + myPeerId);
@@ -410,10 +355,7 @@ public class peerProcess {
         }
     }
     
-    /**
-     * Checks if all peers have the complete file.
-     * @return True if all peers have all pieces, false otherwise
-     */
+    // returns true once every peer (including us) has all pieces
     private boolean allPeersHaveCompleteFile() {
         if (!myBitfield.hasAllPieces()) {
             return false;
@@ -428,9 +370,7 @@ public class peerProcess {
         return peerBitfields.size() == peerInfoConfig.getPeerCount() - 1;
     }
     
-    /**
-     * Shuts down the peer process.
-     */
+    // close all sockets and stop the thread pools
     private void shutdown() {
         try {
             logger.info("Shutting down Peer " + myPeerId);
@@ -460,10 +400,6 @@ public class peerProcess {
         }
     }
     
-    /**
-     * Main entry point for the peer process.
-     * @param args Command line arguments (expects peer ID)
-     */
     public static void main(String[] args) {
         if (args.length < 1) {
             System.err.println("Usage: java peerProcess <peerID>");

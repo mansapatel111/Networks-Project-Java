@@ -4,13 +4,8 @@ import java.io.*;
 import java.nio.ByteBuffer;
 import java.util.Arrays;
 
-/**
- * Handshake represents the initial handshake message exchanged between peers.
- * Handshake format (32 bytes total):
- *   18 bytes: header string "P2PFILESHARINGPROJ"
- *   10 bytes: zero padding
- *   4 bytes:  peer ID (as integer)
- */
+// the initial handshake message exchanged between peers
+// format: 18-byte header | 10 zero bytes | 4-byte peer ID  (32 bytes total)
 public class Handshake {
     
     // Protocol header constant
@@ -22,26 +17,15 @@ public class Handshake {
     
     private final int peerId;
     
-    /**
-     * Constructor for creating a handshake message.
-     * @param peerId Peer ID to include in the handshake
-     */
     public Handshake(int peerId) {
         this.peerId = peerId;
     }
     
-    /**
-     * Gets the peer ID from this handshake.
-     * @return Peer ID
-     */
     public int getPeerId() {
         return peerId;
     }
     
-    /**
-     * Serializes the handshake message to a byte array.
-     * @return 32-byte handshake message
-     */
+    // serialize to a 32-byte array
     public byte[] toBytes() {
         ByteBuffer buffer = ByteBuffer.allocate(HANDSHAKE_LENGTH);
         
@@ -59,23 +43,14 @@ public class Handshake {
         return buffer.array();
     }
     
-    /**
-     * Sends this handshake message to the specified output stream.
-     * @param out DataOutputStream to send the handshake to
-     * @throws IOException if an I/O error occurs
-     */
+    // write the handshake to the output stream
     public void send(DataOutputStream out) throws IOException {
         byte[] handshakeBytes = toBytes();
         out.write(handshakeBytes);
         out.flush();
     }
     
-    /**
-     * Reads a handshake message from the specified input stream.
-     * @param in DataInputStream to read from
-     * @return Parsed Handshake object
-     * @throws IOException if an I/O error occurs or handshake format is invalid
-     */
+    // read a 32-byte handshake from the input stream
     public static Handshake receive(DataInputStream in) throws IOException {
         byte[] handshakeBytes = new byte[HANDSHAKE_LENGTH];
         in.readFully(handshakeBytes);
@@ -83,12 +58,7 @@ public class Handshake {
         return fromBytes(handshakeBytes);
     }
     
-    /**
-     * Parses a handshake message from a byte array.
-     * @param bytes Byte array containing the handshake (must be 32 bytes)
-     * @return Parsed Handshake object
-     * @throws IOException if handshake format is invalid
-     */
+    // parse bytes into a Handshake object, validates header and length
     public static Handshake fromBytes(byte[] bytes) throws IOException {
         if (bytes.length != HANDSHAKE_LENGTH) {
             throw new IOException("Invalid handshake length: " + bytes.length + " (expected " + HANDSHAKE_LENGTH + ")");
@@ -115,18 +85,11 @@ public class Handshake {
         return new Handshake(peerId);
     }
     
-    /**
-     * Validates that the handshake header matches the expected protocol header.
-     * @return True if header is valid, false otherwise
-     */
+    // basic sanity check on the peer ID
     public boolean isValid() {
         return peerId > 0;
     }
     
-    /**
-     * Gets the expected handshake length in bytes.
-     * @return Handshake length (32 bytes)
-     */
     public static int getHandshakeLength() {
         return HANDSHAKE_LENGTH;
     }

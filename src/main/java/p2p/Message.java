@@ -3,72 +3,38 @@ package p2p;
 import java.io.*;
 import java.nio.ByteBuffer;
 
-/**
- * Message represents a protocol message exchanged between peers.
- * Message format:
- *   4 bytes: message length (length of message type + payload)
- *   1 byte:  message type
- *   N bytes: payload (optional, depends on message type)
- */
+// a protocol message: [4-byte length][1-byte type][payload]
 public class Message {
     
     private MessageType type;
     private byte[] payload;
     
-    /**
-     * Constructor for a message without payload.
-     * @param type Message type
-     */
+    // message with no payload
     public Message(MessageType type) {
         this.type = type;
         this.payload = new byte[0];
     }
     
-    /**
-     * Constructor for a message with payload.
-     * @param type Message type
-     * @param payload Payload bytes
-     */
+    // message with a payload
     public Message(MessageType type, byte[] payload) {
         this.type = type;
         this.payload = payload != null ? payload : new byte[0];
     }
     
-    /**
-     * Creates a HAVE message with the specified piece index.
-     * @param pieceIndex Index of the piece
-     * @return HAVE message
-     */
     public static Message createHaveMessage(int pieceIndex) {
         byte[] payload = ByteBuffer.allocate(4).putInt(pieceIndex).array();
         return new Message(MessageType.HAVE, payload);
     }
     
-    /**
-     * Creates a BITFIELD message with the specified bitfield data.
-     * @param bitfieldBytes Byte array representing the bitfield
-     * @return BITFIELD message
-     */
     public static Message createBitfieldMessage(byte[] bitfieldBytes) {
         return new Message(MessageType.BITFIELD, bitfieldBytes);
     }
     
-    /**
-     * Creates a REQUEST message for the specified piece index.
-     * @param pieceIndex Index of the piece to request
-     * @return REQUEST message
-     */
     public static Message createRequestMessage(int pieceIndex) {
         byte[] payload = ByteBuffer.allocate(4).putInt(pieceIndex).array();
         return new Message(MessageType.REQUEST, payload);
     }
     
-    /**
-     * Creates a PIECE message with the specified piece index and data.
-     * @param pieceIndex Index of the piece
-     * @param pieceData Data of the piece
-     * @return PIECE message
-     */
     public static Message createPieceMessage(int pieceIndex, byte[] pieceData) {
         ByteBuffer buffer = ByteBuffer.allocate(4 + pieceData.length);
         buffer.putInt(pieceIndex);
@@ -76,27 +42,15 @@ public class Message {
         return new Message(MessageType.PIECE, buffer.array());
     }
     
-    /**
-     * Gets the message type.
-     * @return Message type
-     */
     public MessageType getType() {
         return type;
     }
     
-    /**
-     * Gets the payload.
-     * @return Payload bytes
-     */
     public byte[] getPayload() {
         return payload;
     }
     
-    /**
-     * Gets the piece index from HAVE, REQUEST, or PIECE messages.
-     * @return Piece index
-     * @throws IllegalStateException if message type doesn't contain a piece index
-     */
+    // extracts the piece index from HAVE, REQUEST, or PIECE messages
     public int getPieceIndex() {
         if (type == MessageType.HAVE || type == MessageType.REQUEST) {
             return ByteBuffer.wrap(payload).getInt();
@@ -106,11 +60,7 @@ public class Message {
         throw new IllegalStateException("Message type does not contain piece index: " + type);
     }
     
-    /**
-     * Gets the piece data from a PIECE message.
-     * @return Piece data bytes
-     * @throws IllegalStateException if message is not a PIECE message
-     */
+    // pull out the actual piece data from a PIECE message (skips the 4-byte index prefix)
     public byte[] getPieceData() {
         if (type != MessageType.PIECE) {
             throw new IllegalStateException("Not a PIECE message");
@@ -120,11 +70,7 @@ public class Message {
         return data;
     }
     
-    /**
-     * Serializes the message to a byte array for transmission.
-     * Format: [4-byte length][1-byte type][payload]
-     * @return Serialized message bytes
-     */
+    // serialize to bytes: [4-byte length][1-byte type][payload]
     public byte[] toBytes() {
         int messageLength = 1 + payload.length; // type + payload
         ByteBuffer buffer = ByteBuffer.allocate(4 + messageLength);
@@ -136,23 +82,14 @@ public class Message {
         return buffer.array();
     }
     
-    /**
-     * Sends this message to the specified output stream.
-     * @param out DataOutputStream to send the message to
-     * @throws IOException if an I/O error occurs
-     */
+    // write this message to the output stream
     public void send(DataOutputStream out) throws IOException {
         byte[] messageBytes = toBytes();
         out.write(messageBytes);
         out.flush();
     }
     
-    /**
-     * Reads a message from the specified input stream.
-     * @param in DataInputStream to read from
-     * @return Parsed Message object
-     * @throws IOException if an I/O error occurs or message format is invalid
-     */
+    // read the next message from the input stream
     public static Message receive(DataInputStream in) throws IOException {
         // Read message length (4 bytes)
         int messageLength = in.readInt();
@@ -176,10 +113,6 @@ public class Message {
         return new Message(type, payload);
     }
     
-    /**
-     * Gets the total size of the message in bytes (including length field).
-     * @return Total message size
-     */
     public int getTotalSize() {
         return 4 + 1 + payload.length;
     }

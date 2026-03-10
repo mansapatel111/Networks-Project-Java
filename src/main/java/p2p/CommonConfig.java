@@ -3,10 +3,7 @@ package p2p;
 import java.io.*;
 import java.util.*;
 
-/**
- * CommonConfig reads and parses the Common.cfg file containing
- * system-wide configuration parameters for the P2P file sharing system.
- */
+// reads and stores the values from Common.cfg
 public class CommonConfig {
     
     // Configuration parameters
@@ -18,26 +15,13 @@ public class CommonConfig {
     private int pieceSize;
     private int pieceCount;
     
-    /**
-     * Constructor that loads configuration from the specified file.
-     * @param configFilePath Path to the Common.cfg file
-     * @throws IOException if file cannot be read or parsed
-     */
     public CommonConfig(String configFilePath) throws IOException {
         loadConfig(configFilePath);
         calculatePieceCount();
     }
     
-    /**
-     * Parses the Common.cfg file and loads configuration parameters.
-     * Expected format:
-     *   NumberOfPreferredNeighbors <value>
-     *   UnchokingInterval <value>
-     *   OptimisticUnchokingInterval <value>
-     *   FileName <value>
-     *   FileSize <value>
-     *   PieceSize <value>
-     */
+    // parse Common.cfg line by line
+    // expected format: NumberOfPreferredNeighbors <value>, UnchokingInterval <value>, etc.
     private void loadConfig(String configFilePath) throws IOException {
         BufferedReader reader = new BufferedReader(new FileReader(configFilePath));
         String line;
@@ -85,18 +69,12 @@ public class CommonConfig {
         validateConfig();
     }
     
-    /**
-     * Calculates the total number of pieces based on file size and piece size.
-     * Formula: pieceCount = ceil(FileSize / PieceSize)
-     */
+    // pieceCount = ceil(FileSize / PieceSize)
     private void calculatePieceCount() {
         pieceCount = (int) Math.ceil((double) fileSize / pieceSize);
     }
     
-    /**
-     * Validates that all required configuration parameters were loaded.
-     * @throws IllegalStateException if any required parameter is missing or invalid
-     */
+    // make sure all required fields were actually set
     private void validateConfig() {
         if (numberOfPreferredNeighbors <= 0) {
             throw new IllegalStateException("NumberOfPreferredNeighbors must be positive");
