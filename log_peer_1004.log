@@ -1,0 +1,72 @@
+Mar 10, 2026 2:39:44 PM p2p.peerProcess start
+INFO: Starting Peer 1004
+Mar 10, 2026 2:39:44 PM p2p.peerProcess loadConfigurations
+INFO: Loaded common configuration: CommonConfig{numberOfPreferredNeighbors=2, unchokingInterval=5, optimisticUnchokingInterval=15, fileName='TheFile.dat', fileSize=10000232, pieceSize=32768, pieceCount=306}
+Mar 10, 2026 2:39:44 PM p2p.peerProcess loadConfigurations
+INFO: Loaded peer configuration with 4 peers
+Mar 10, 2026 2:39:44 PM p2p.peerProcess loadConfigurations
+INFO: My peer info: PeerInfo{peerId=1004, hostName='localhost', port=6011, hasFile=false}
+Mar 10, 2026 2:39:44 PM p2p.peerProcess initializeBitfield
+INFO: Initialized bitfield: Bitfield{pieces=000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000, owned=0/306, completion=0.00%}
+Mar 10, 2026 2:39:44 PM p2p.peerProcess initializeBitfield
+INFO: Peer 1004 does not have the file
+Mar 10, 2026 2:39:44 PM p2p.peerProcess startServer
+INFO: Server started on port 6011
+Mar 10, 2026 2:39:45 PM p2p.peerProcess connectToPeers
+INFO: Connecting to 3 peers
+Mar 10, 2026 2:39:45 PM p2p.peerProcess start
+INFO: Peer 1004 started successfully
+Mar 10, 2026 2:39:45 PM p2p.peerProcess connectToPeer
+INFO: TCP connection established to Peer 1001 at localhost:6008
+Mar 10, 2026 2:39:45 PM p2p.peerProcess connectToPeer
+INFO: TCP connection established to Peer 1003 at localhost:6010
+Mar 10, 2026 2:39:45 PM p2p.peerProcess connectToPeer
+INFO: TCP connection established to Peer 1002 at localhost:6009
+Mar 10, 2026 2:39:45 PM p2p.peerProcess connectToPeer
+INFO: Sent handshake to Peer 1003
+Mar 10, 2026 2:39:45 PM p2p.peerProcess connectToPeer
+INFO: Sent handshake to Peer 1001
+Mar 10, 2026 2:39:45 PM p2p.peerProcess connectToPeer
+INFO: Sent handshake to Peer 1002
+Mar 10, 2026 2:39:45 PM p2p.peerProcess connectToPeer
+INFO: Received handshake from Peer 1003
+Mar 10, 2026 2:39:45 PM p2p.peerProcess connectToPeer
+INFO: Received handshake from Peer 1001
+Mar 10, 2026 2:39:45 PM p2p.peerProcess connectToPeer
+INFO: Received handshake from Peer 1002
+Mar 10, 2026 2:39:45 PM p2p.peerProcess connectToPeer
+INFO: Peer 1004 makes a connection to Peer 1003
+Mar 10, 2026 2:39:45 PM p2p.peerProcess connectToPeer
+INFO: Peer 1004 makes a connection to Peer 1002
+Mar 10, 2026 2:39:45 PM p2p.peerProcess connectToPeer
+INFO: Peer 1004 makes a connection to Peer 1001
+Mar 10, 2026 2:39:45 PM p2p.peerProcess exchangeBitfields
+INFO: Sent bitfield to Peer 1003
+Mar 10, 2026 2:39:45 PM p2p.peerProcess exchangeBitfields
+INFO: Sent bitfield to Peer 1001
+Mar 10, 2026 2:39:45 PM p2p.peerProcess exchangeBitfields
+INFO: Sent bitfield to Peer 1002
+Mar 10, 2026 2:39:45 PM p2p.peerProcess exchangeBitfields
+INFO: Received bitfield from Peer 1001: Bitfield{pieces=111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111, owned=306/306, completion=100.00%}
+Mar 10, 2026 2:39:45 PM p2p.peerProcess exchangeBitfields
+INFO: Received bitfield from Peer 1003: Bitfield{pieces=000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000, owned=0/306, completion=0.00%}
+Mar 10, 2026 2:39:45 PM p2p.peerProcess exchangeBitfields
+INFO: Received bitfield from Peer 1002: Bitfield{pieces=000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000, owned=0/306, completion=0.00%}
+Mar 10, 2026 2:39:45 PM p2p.peerProcess determineAndSendInterest
+INFO: Sent NOT_INTERESTED to Peer 1003
+Mar 10, 2026 2:39:45 PM p2p.peerProcess determineAndSendInterest
+INFO: Sent INTERESTED to Peer 1001
+Mar 10, 2026 2:39:45 PM p2p.peerProcess determineAndSendInterest
+INFO: Sent NOT_INTERESTED to Peer 1002
+Mar 10, 2026 2:39:45 PM p2p.peerProcess handlePeerMessages
+INFO: Received Message{type=NOT_INTERESTED} from Peer 1003
+Mar 10, 2026 2:39:45 PM p2p.peerProcess handlePeerMessages
+INFO: Received Message{type=NOT_INTERESTED} from Peer 1002
+Mar 10, 2026 2:39:45 PM p2p.peerProcess handlePeerMessages
+INFO: Received Message{type=NOT_INTERESTED} from Peer 1001
+Mar 10, 2026 2:39:45 PM p2p.peerProcess processMessage
+INFO: Peer 1004 received NOT_INTERESTED from Peer 1002
+Mar 10, 2026 2:39:45 PM p2p.peerProcess processMessage
+INFO: Peer 1004 received NOT_INTERESTED from Peer 1003
+Mar 10, 2026 2:39:45 PM p2p.peerProcess processMessage
+INFO: Peer 1004 received NOT_INTERESTED from Peer 1001
