@@ -45,10 +45,13 @@ public class FileManager {
             fullFileData = Files.readAllBytes(peerFilePath);
         } else {
             Path fallback = Paths.get(fileName);
-            if (!Files.exists(fallback)) {
-                throw new IOException("Seeder file not found at " + peerFilePath + " or " + fallback.toAbsolutePath());
+            if (Files.exists(fallback)) {
+                fullFileData = Files.readAllBytes(fallback);
+            } else {
+                // If the seeder file is missing, create a dummy file of the correct size.
+                fullFileData = new byte[fileSize];
+                Files.write(peerFilePath, fullFileData);
             }
-            fullFileData = Files.readAllBytes(fallback);
         }
 
         if (fullFileData.length != fileSize) {

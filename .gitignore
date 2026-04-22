@@ -2,3 +2,15 @@
 # ignore build output files
 /bin/
 /bin/p2p/
+/peer_1001/
+/peer_1002/
+/peer_1003/
+/peer_1004/
+# ignore log files
+*.log
+log_peer_1001.log
+log_peer_1002.log
+log_peer_1003.log
+log_peer_1004.log
+# ignore temporary files
+*.tmp
