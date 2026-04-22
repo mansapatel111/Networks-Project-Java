@@ -6,530 +6,371 @@ import java.util.*;
 import java.util.concurrent.*;
 import java.util.logging.*;
 
-// main entry point — run with: java peerProcess <peerID>
-// reads configs, starts server, connects to earlier peers, and runs the file sharing protocol
 public class peerProcess {
-    
-    // Configuration
     private static final String COMMON_CONFIG_FILE = "Common.cfg";
     private static final String PEER_INFO_CONFIG_FILE = "PeerInfo.cfg";
-    
-    // Instance variables
+
     private final int myPeerId;
     private CommonConfig commonConfig;
     private PeerInfoConfig peerInfoConfig;
     private PeerInfo myPeerInfo;
     private FileManager fileManager;
-    
-    // Server socket for accepting connections
     private ServerSocket serverSocket;
-    
-    // Active connections to other peers
-    private final Map<Integer, Socket> peerConnections;
-    private final Map<Integer, DataOutputStream> outputStreams;
-    private final Map<Integer, DataInputStream> inputStreams;
-    private final Map<Integer, Boolean> peerChokingMe;
-    private final Map<Integer, Boolean> iAmChokingPeer;
-    private final Set<Integer> interestedPeers;
-    private final Map<Integer, Integer> bytesDownloadedByPeer;
-    private final Set<Integer> requestedPieces;
-    private final Map<Integer, Integer> requestedPieceOwners;
-    
-    // Bitfields tracking what pieces each peer has
+
+    private final Map<Integer, Socket> peerConnections = new ConcurrentHashMap<>();
+    private final Map<Integer, DataOutputStream> outputStreams = new ConcurrentHashMap<>();
+    private final Map<Integer, DataInputStream> inputStreams = new ConcurrentHashMap<>();
+    private final Map<Integer, Boolean> peerChokingMe = new ConcurrentHashMap<>();
+    private final Map<Integer, Boolean> iAmChokingPeer = new ConcurrentHashMap<>();
+    private final Set<Integer> interestedPeers = ConcurrentHashMap.newKeySet();
+    private final Map<Integer, Integer> bytesDownloadedByPeer = new ConcurrentHashMap<>();
+    private final Set<Integer> requestedPieces = ConcurrentHashMap.newKeySet();
+    private final Map<Integer, Integer> requestedPieceOwners = new ConcurrentHashMap<>();
     private Bitfield myBitfield;
-    private final Map<Integer, Bitfield> peerBitfields;
-    
-    // Thread management
-    private final ExecutorService threadPool;
+    private final Map<Integer, Bitfield> peerBitfields = new ConcurrentHashMap<>();
+
+    private final ExecutorService threadPool = Executors.newCachedThreadPool();
     private ScheduledExecutorService scheduler;
-    private final Set<Integer> preferredNeighbors;
-    private volatile Integer optimisticNeighbor;
-    private volatile boolean completionLogged;
-    
-    // Logger
+    private final Set<Integer> preferredNeighbors = ConcurrentHashMap.newKeySet();
+    private volatile Integer optimisticNeighbor = null;
+    private volatile boolean completionLogged = false;
+    private final Set<Integer> completedPeers = ConcurrentHashMap.newKeySet();
+
     private static Logger logger;
-    
+
     public peerProcess(int peerId) {
         this.myPeerId = peerId;
-        this.peerConnections = new ConcurrentHashMap<>();
-        this.outputStreams = new ConcurrentHashMap<>();
-        this.inputStreams = new ConcurrentHashMap<>();
-        this.peerChokingMe = new ConcurrentHashMap<>();
-        this.iAmChokingPeer = new ConcurrentHashMap<>();
-        this.interestedPeers = ConcurrentHashMap.newKeySet();
-        this.bytesDownloadedByPeer = new ConcurrentHashMap<>();
-        this.requestedPieces = ConcurrentHashMap.newKeySet();
-        this.requestedPieceOwners = new ConcurrentHashMap<>();
-        this.peerBitfields = new ConcurrentHashMap<>();
-        this.threadPool = Executors.newCachedThreadPool();
-        this.preferredNeighbors = ConcurrentHashMap.newKeySet();
-        this.optimisticNeighbor = null;
-        this.completionLogged = false;
-        
-        // Initialize logger
         setupLogger();
     }
-    
-    // set up a file logger at log_peer_<peerID>.log
+
     private void setupLogger() {
         try {
             logger = Logger.getLogger("Peer_" + myPeerId);
             logger.setUseParentHandlers(false);
-            
-            FileHandler fileHandler = new FileHandler("log_peer_" + myPeerId + ".log");
-            fileHandler.setFormatter(new SimpleFormatter());
-            logger.addHandler(fileHandler);
+            FileHandler fh = new FileHandler("log_peer_" + myPeerId + ".log");
+            fh.setFormatter(new SimpleFormatter());
+            logger.addHandler(fh);
+
+            // Also log to console for demo visibility
+            ConsoleHandler ch = new ConsoleHandler();
+            ch.setFormatter(new SimpleFormatter());
+            logger.addHandler(ch);
             logger.setLevel(Level.ALL);
-            
         } catch (IOException e) {
-            System.err.println("Failed to initialize logger: " + e.getMessage());
+            System.err.println("Logger setup failed: " + e.getMessage());
         }
     }
-    
-    // load Common.cfg and PeerInfo.cfg
+
     private void loadConfigurations() throws IOException {
-        // Load common configuration
         commonConfig = new CommonConfig(COMMON_CONFIG_FILE);
-        logger.info("Loaded common configuration: " + commonConfig);
-        
-        // Load peer information
         peerInfoConfig = new PeerInfoConfig(PEER_INFO_CONFIG_FILE);
-        logger.info("Loaded peer configuration with " + peerInfoConfig.getPeerCount() + " peers");
-        
-        // Find my peer information
         myPeerInfo = peerInfoConfig.getPeerById(myPeerId);
-        if (myPeerInfo == null) {
-            throw new IllegalArgumentException("Peer ID " + myPeerId + " not found in " + PEER_INFO_CONFIG_FILE);
-        }
-        
-        logger.info("My peer info: " + myPeerInfo);
+        if (myPeerInfo == null) throw new IllegalArgumentException("Peer " + myPeerId + " not in PeerInfo.cfg");
+        logger.info("Peer " + myPeerId + " Start, set variables to " + commonConfig +
+                    ", bitfield to " + (myPeerInfo.hasFile() ? "all 1s" : "all 0s"));
     }
-    
-    // set up our bitfield based on whether we start with the file
+
     private void initializeBitfield() throws IOException {
         int pieceCount = commonConfig.getPieceCount();
         boolean hasFile = myPeerInfo.hasFile();
-
-        fileManager = new FileManager(
-                myPeerId,
-                commonConfig.getFileName(),
-                commonConfig.getFileSize(),
-                commonConfig.getPieceSize(),
-                pieceCount,
-                hasFile
-        );
-        
+        fileManager = new FileManager(myPeerId, commonConfig.getFileName(),
+                commonConfig.getFileSize(), commonConfig.getPieceSize(), pieceCount, hasFile);
         myBitfield = new Bitfield(pieceCount, hasFile);
-        logger.info("Initialized bitfield: " + myBitfield);
-        logger.info("Working directory for file pieces: " + fileManager.getPeerDirectory());
-        
-        if (hasFile) {
-            logger.info("Peer " + myPeerId + " has the complete file");
-            completionLogged = true;
-        } else {
-            logger.info("Peer " + myPeerId + " does not have the file");
-        }
+        if (hasFile) completionLogged = true;
     }
-    
-    // open a server socket and spin up a thread to accept incoming connections
+
     private void startServer() throws IOException {
         serverSocket = new ServerSocket(myPeerInfo.getPort());
-        logger.info("Server started on port " + myPeerInfo.getPort());
-        
-        // Start a thread to accept incoming connections
         threadPool.execute(() -> {
             while (!serverSocket.isClosed()) {
                 try {
                     Socket clientSocket = serverSocket.accept();
-                    logger.info("Accepted incoming connection from " + clientSocket.getInetAddress());
-                    
-                    // Handle the connection in a separate thread
                     threadPool.execute(() -> handleIncomingConnection(clientSocket));
-                    
                 } catch (IOException e) {
-                    if (!serverSocket.isClosed()) {
-                        logger.warning("Error accepting connection: " + e.getMessage());
-                    }
+                    if (!serverSocket.isClosed()) logger.warning("Accept error: " + e.getMessage());
                 }
             }
         });
     }
-    
-    // called when a peer connects to us — do handshake, exchange bitfields, then start messaging
+
     private void handleIncomingConnection(Socket socket) {
         try {
             DataInputStream in = new DataInputStream(socket.getInputStream());
             DataOutputStream out = new DataOutputStream(socket.getOutputStream());
-            
-            // Receive handshake from the peer
-            Handshake receivedHandshake = Handshake.receive(in);
-            int remotePeerId = receivedHandshake.getPeerId();
-            
-            logger.info("Received handshake from Peer " + remotePeerId);
-            
-            // Send my handshake
-            Handshake myHandshake = new Handshake(myPeerId);
-            myHandshake.send(out);
-            
-            logger.info("Sent handshake to Peer " + remotePeerId);
-            
-            // Store connection information
-            peerConnections.put(remotePeerId, socket);
-            inputStreams.put(remotePeerId, in);
-            outputStreams.put(remotePeerId, out);
-            peerChokingMe.put(remotePeerId, false);
-            iAmChokingPeer.put(remotePeerId, true);
-            sendMessage(out, new Message(MessageType.CHOKE));
-            
-            // Exchange bitfields
+
+            Handshake received = Handshake.receive(in);
+            int remotePeerId = received.getPeerId();
+
+            new Handshake(myPeerId).send(out);
+
+            logger.info("Peer " + myPeerId + " is connected from Peer " + remotePeerId);
+
+            registerPeer(remotePeerId, socket, in, out);
             exchangeBitfields(remotePeerId, in, out);
-            
-            // Start message handling for this peer
             handlePeerMessages(remotePeerId, in, out);
-            
         } catch (IOException e) {
-            logger.warning("Error handling incoming connection: " + e.getMessage());
+            logger.warning("Incoming connection error: " + e.getMessage());
         }
     }
-    
-    // connect to peers that are listed before us in PeerInfo.cfg
+
     private void connectToPeers() {
-        List<PeerInfo> peersToConnect = peerInfoConfig.getPeersToConnectTo(myPeerId);
-        
-        logger.info("Connecting to " + peersToConnect.size() + " peers");
-        
-        for (PeerInfo peerInfo : peersToConnect) {
+        for (PeerInfo peerInfo : peerInfoConfig.getPeersToConnectTo(myPeerId)) {
             threadPool.execute(() -> connectToPeer(peerInfo));
         }
     }
-    
-    // open a TCP connection to a peer, do handshake, exchange bitfields, start messaging
+
     private void connectToPeer(PeerInfo peerInfo) {
-        try {
-            // Establish TCP connection
-            Socket socket = new Socket(peerInfo.getHostName(), peerInfo.getPort());
-            logger.info("TCP connection established to Peer " + peerInfo.getPeerId() + 
-                       " at " + peerInfo.getHostName() + ":" + peerInfo.getPort());
-            
-            DataInputStream in = new DataInputStream(socket.getInputStream());
-            DataOutputStream out = new DataOutputStream(socket.getOutputStream());
-            
-            // Send handshake
-            Handshake myHandshake = new Handshake(myPeerId);
-            myHandshake.send(out);
-            
-            logger.info("Sent handshake to Peer " + peerInfo.getPeerId());
-            
-            // Receive handshake
-            Handshake receivedHandshake = Handshake.receive(in);
-            
-            if (receivedHandshake.getPeerId() != peerInfo.getPeerId()) {
-                logger.warning("Handshake peer ID mismatch. Expected: " + peerInfo.getPeerId() + 
-                             ", Received: " + receivedHandshake.getPeerId());
-                socket.close();
+        // Retry a few times in case the peer isn't ready yet
+        for (int attempt = 0; attempt < 10; attempt++) {
+            try {
+                Socket socket = new Socket(peerInfo.getHostName(), peerInfo.getPort());
+                DataInputStream in = new DataInputStream(socket.getInputStream());
+                DataOutputStream out = new DataOutputStream(socket.getOutputStream());
+
+                new Handshake(myPeerId).send(out);
+                Handshake received = Handshake.receive(in);
+
+                if (received.getPeerId() != peerInfo.getPeerId()) {
+                    logger.warning("Handshake ID mismatch from " + peerInfo.getPeerId());
+                    socket.close();
+                    return;
+                }
+
+                logger.info("Peer " + myPeerId + " makes a connection to Peer " + peerInfo.getPeerId());
+
+                registerPeer(peerInfo.getPeerId(), socket, in, out);
+                exchangeBitfields(peerInfo.getPeerId(), in, out);
+                handlePeerMessages(peerInfo.getPeerId(), in, out);
                 return;
+
+            } catch (IOException e) {
+                try { Thread.sleep(500); } catch (InterruptedException ie) { Thread.currentThread().interrupt(); return; }
             }
-            
-            logger.info("Received handshake from Peer " + peerInfo.getPeerId());
-            logger.info("Peer " + myPeerId + " makes a connection to Peer " + peerInfo.getPeerId());
-            
-            // Store connection information
-            peerConnections.put(peerInfo.getPeerId(), socket);
-            inputStreams.put(peerInfo.getPeerId(), in);
-            outputStreams.put(peerInfo.getPeerId(), out);
-            peerChokingMe.put(peerInfo.getPeerId(), false);
-            iAmChokingPeer.put(peerInfo.getPeerId(), true);
-            sendMessage(out, new Message(MessageType.CHOKE));
-            
-            // Exchange bitfields
-            exchangeBitfields(peerInfo.getPeerId(), in, out);
-            
-            // Start message handling for this peer
-            handlePeerMessages(peerInfo.getPeerId(), in, out);
-            
-        } catch (IOException e) {
-            logger.warning("Failed to connect to Peer " + peerInfo.getPeerId() + ": " + e.getMessage());
         }
+        logger.warning("Failed to connect to Peer " + peerInfo.getPeerId() + " after retries");
     }
-    
-    // send our bitfield, receive theirs, then send INTERESTED or NOT_INTERESTED
+
+    private void registerPeer(int peerId, Socket socket, DataInputStream in, DataOutputStream out) throws IOException {
+        peerConnections.put(peerId, socket);
+        inputStreams.put(peerId, in);
+        outputStreams.put(peerId, out);
+        peerChokingMe.put(peerId, true);  // assume choked until told otherwise
+        iAmChokingPeer.put(peerId, true); // we start by choking everyone
+    }
+
     private void exchangeBitfields(int peerId, DataInputStream in, DataOutputStream out) throws IOException {
-        // Send my bitfield
-        Message bitfieldMessage = Message.createBitfieldMessage(myBitfield.toBytes());
-        sendMessage(out, bitfieldMessage);
-        logger.info("Sent bitfield to Peer " + peerId);
-        
-        // Receive peer's bitfield
-        Message receivedMessage = Message.receive(in);
-        
-        if (receivedMessage.getType() == MessageType.BITFIELD) {
-            Bitfield peerBitfield = new Bitfield(commonConfig.getPieceCount(), receivedMessage.getPayload());
-            peerBitfields.put(peerId, peerBitfield);
-            logger.info("Received bitfield from Peer " + peerId + ": " + peerBitfield);
-            
-            // Determine interest
-            determineAndSendInterest(peerId, out);
-            maybeRequestNextPiece(peerId, out);
-        }
-    }
-    
-    // check if the peer has anything we need and send INTERESTED / NOT_INTERESTED accordingly
-    private void determineAndSendInterest(int peerId, DataOutputStream out) throws IOException {
-        Bitfield peerBitfield = peerBitfields.get(peerId);
-        
-        if (peerBitfield != null && peerBitfield.hasInterestingPiecesFor(myBitfield)) {
-            Message interestedMessage = new Message(MessageType.INTERESTED);
-            sendMessage(out, interestedMessage);
-            logger.info("Sent INTERESTED to Peer " + peerId);
+
+        sendMessage(out, Message.createBitfieldMessage(myBitfield.toBytes()));
+
+        Message msg = Message.receive(in);
+        if (msg.getType() == MessageType.BITFIELD) {
+            Bitfield peerBf = new Bitfield(commonConfig.getPieceCount(), msg.getPayload());
+            peerBitfields.put(peerId, peerBf);
+            sendInterestDecision(peerId, out);
         } else {
-            Message notInterestedMessage = new Message(MessageType.NOT_INTERESTED);
-            sendMessage(out, notInterestedMessage);
-            logger.info("Sent NOT_INTERESTED to Peer " + peerId);
+            // They had no pieces and skipped BITFIELD; process this message normally
+            peerBitfields.put(peerId, new Bitfield(commonConfig.getPieceCount()));
+            sendInterestDecision(peerId, out);
+            processMessage(peerId, msg, out);
         }
     }
-    
-    // loop that reads and processes messages from a connected peer
+
+    private void sendInterestDecision(int peerId, DataOutputStream out) throws IOException {
+        Bitfield peerBf = peerBitfields.get(peerId);
+        if (peerBf != null && peerBf.hasInterestingPiecesFor(myBitfield)) {
+            sendMessage(out, new Message(MessageType.INTERESTED));
+            logger.info("Peer " + myPeerId + " sent INTERESTED to Peer " + peerId);
+        } else {
+            sendMessage(out, new Message(MessageType.NOT_INTERESTED));
+            logger.info("Peer " + myPeerId + " sent NOT_INTERESTED to Peer " + peerId);
+        }
+    }
+
     private void handlePeerMessages(int peerId, DataInputStream in, DataOutputStream out) {
         try {
             while (!Thread.currentThread().isInterrupted()) {
-                Message message = Message.receive(in);
-                logger.info("Received " + message + " from Peer " + peerId);
-                
-                // Process message based on type
-                processMessage(peerId, message, out);
+                Message msg = Message.receive(in);
+                processMessage(peerId, msg, out);
             }
         } catch (IOException e) {
-            logger.info("Connection closed with Peer " + peerId + ": " + e.getMessage());
+            logger.info("Connection closed with Peer " + peerId);
         } finally {
-            cleanupPeerConnection(peerId);
+            cleanupPeer(peerId);
         }
     }
-    
-    // dispatch a received message to the appropriate handler logic
-    private void processMessage(int peerId, Message message, DataOutputStream out) throws IOException {
-        switch (message.getType()) {
+
+    private void processMessage(int peerId, Message msg, DataOutputStream out) throws IOException {
+        switch (msg.getType()) {
             case CHOKE:
                 peerChokingMe.put(peerId, true);
-                logger.info("Peer " + myPeerId + " is choked by Peer " + peerId);
+                logger.info("Peer " + myPeerId + " is choked by " + peerId);
+                // Release any pieces we requested from this peer so others can serve them
+                List<Integer> stuckPieces = new ArrayList<>();
+                for (Map.Entry<Integer, Integer> e : requestedPieceOwners.entrySet()) {
+                    if (e.getValue().equals(peerId)) stuckPieces.add(e.getKey());
+                }
+                for (int p : stuckPieces) {
+                    requestedPieceOwners.remove(p);
+                    requestedPieces.remove(p);
+                }
                 break;
-                
             case UNCHOKE:
                 peerChokingMe.put(peerId, false);
-                logger.info("Peer " + myPeerId + " is unchoked by Peer " + peerId);
+                logger.info("Peer " + myPeerId + " is unchoked by " + peerId);
                 maybeRequestNextPiece(peerId, out);
                 break;
-                
             case INTERESTED:
-                logger.info("Peer " + myPeerId + " received INTERESTED from Peer " + peerId);
+                logger.info("Peer " + myPeerId + " received the 'interested' message from " + peerId);
                 interestedPeers.add(peerId);
                 break;
-                
             case NOT_INTERESTED:
-                logger.info("Peer " + myPeerId + " received NOT_INTERESTED from Peer " + peerId);
+                logger.info("Peer " + myPeerId + " received the 'not interested' message from " + peerId);
                 interestedPeers.remove(peerId);
                 break;
-                
             case HAVE:
-                int pieceIndex = message.getPieceIndex();
-                Bitfield peerBitfield = peerBitfields.get(peerId);
-                if (peerBitfield != null) {
-                    peerBitfield.setPiece(pieceIndex);
+                int piece = msg.getPieceIndex();
+                logger.info("Peer " + myPeerId + " received the 'have' message from " + peerId + " for the piece " + piece);
+                Bitfield peerBf = peerBitfields.get(peerId);
+                if (peerBf != null) {
+                    peerBf.setPiece(piece);
+                    if (peerBf.hasAllPieces()) completedPeers.add(peerId);
                 }
-                logger.info("Peer " + myPeerId + " received HAVE message for piece " + pieceIndex + " from Peer " + peerId);
-                
-                // Re-evaluate interest
-                determineAndSendInterest(peerId, out);
+                sendInterestDecision(peerId, out);
                 maybeRequestNextPiece(peerId, out);
                 break;
-                
             case REQUEST:
-                handleRequestMessage(peerId, message, out);
+                handleRequest(peerId, msg, out);
                 break;
-                
             case PIECE:
-                handlePieceMessage(peerId, message, out);
+                handlePiece(peerId, msg, out);
                 break;
-                
             case BITFIELD:
-                Bitfield updatedPeerBitfield = new Bitfield(commonConfig.getPieceCount(), message.getPayload());
-                peerBitfields.put(peerId, updatedPeerBitfield);
-                determineAndSendInterest(peerId, out);
+                Bitfield updatedBf = new Bitfield(commonConfig.getPieceCount(), msg.getPayload());
+                peerBitfields.put(peerId, updatedBf);
+                sendInterestDecision(peerId, out);
                 maybeRequestNextPiece(peerId, out);
                 break;
         }
     }
-    
-    // kick everything off
-    public void start() {
-        try {
-            logger.info("Starting Peer " + myPeerId);
-            
-            // Load configurations
-            loadConfigurations();
-            
-            // Initialize bitfield
-            initializeBitfield();
-            
-            // Start server to accept incoming connections
-            startServer();
-            
-            // Give server time to start
-            Thread.sleep(1000);
-            
-            // Connect to peers that appear before this peer in the config
-            connectToPeers();
 
-            // Run preferred/optimistic neighbor selection tasks
-            startChokingSchedulers();
-            
-            logger.info("Peer " + myPeerId + " started successfully");
-            
-            // Keep the main thread alive
-            while (true) {
-                Thread.sleep(1000);
-                
-                // Check if all peers have the complete file
-                if (allPeersHaveCompleteFile()) {
-                    logger.info("All peers have downloaded the complete file");
-                    shutdown();
-                    break;
-                }
+    private void handleRequest(int peerId, Message msg, DataOutputStream out) throws IOException {
+        if (iAmChokingPeer.getOrDefault(peerId, true)) return;
+        int idx = msg.getPieceIndex();
+        byte[] data = fileManager.readPiece(idx);
+        if (data == null) { logger.warning("Requested piece " + idx + " not available"); return; }
+        sendMessage(out, Message.createPieceMessage(idx, data));
+    }
 
-                if (myBitfield.hasAllPieces() && !completionLogged) {
-                    fileManager.writeFullFile();
-                    logger.info("Peer " + myPeerId + " has downloaded the complete file");
-                    completionLogged = true;
-                }
-            }
-            
-        } catch (Exception e) {
-            logger.severe("Error starting peer: " + e.getMessage());
-            e.printStackTrace();
+    private void handlePiece(int peerId, Message msg, DataOutputStream out) throws IOException {
+        int idx = msg.getPieceIndex();
+        byte[] data = msg.getPieceData();
+        bytesDownloadedByPeer.merge(peerId, data.length, Integer::sum);
+        requestedPieces.remove(idx);
+        requestedPieceOwners.remove(idx);
+
+        boolean newPiece = fileManager.writePiece(idx, data);
+        if (!newPiece) { maybeRequestNextPiece(peerId, out); return; }
+
+        myBitfield.setPiece(idx);
+        logger.info("Peer " + myPeerId + " has downloaded the piece " + idx + " from " + peerId +
+                    ". Now the number of pieces it has is " + myBitfield.getPiecesOwned() + ".");
+        broadcastHave(idx);
+
+        // Mark ourselves as complete when done
+        if (myBitfield.hasAllPieces()) completedPeers.add(myPeerId);
+
+        if (myBitfield.hasAllPieces() && !completionLogged) {
+            fileManager.writeFullFile();
+            logger.info("Peer " + myPeerId + " has downloaded the complete file.");
+            completionLogged = true;
+            broadcastNotInterested();
+            return;
         }
+        maybeRequestNextPiece(peerId, out);
     }
-    
-    // returns true once every peer (including us) has all pieces
-    private boolean allPeersHaveCompleteFile() {
-        if (!myBitfield.hasAllPieces()) {
-            return false;
+
+    private void maybeRequestNextPiece(int peerId, DataOutputStream out) throws IOException {
+        if (peerChokingMe.getOrDefault(peerId, true)) return;
+        Bitfield peerBf = peerBitfields.get(peerId);
+        if (peerBf == null || myBitfield.hasAllPieces()) return;
+
+        int pieceToRequest = pickPiece(peerBf);
+        if (pieceToRequest == -1) {
+            sendMessage(out, new Message(MessageType.NOT_INTERESTED));
+            return;
         }
-        
-        for (Bitfield bitfield : peerBitfields.values()) {
-            if (!bitfield.hasAllPieces()) {
-                return false;
-            }
-        }
-        
-        return peerBitfields.size() == peerInfoConfig.getPeerCount() - 1;
+        requestedPieces.add(pieceToRequest);
+        requestedPieceOwners.put(pieceToRequest, peerId);
+        sendMessage(out, Message.createRequestMessage(pieceToRequest));
     }
-    
-    // close all sockets and stop the thread pools
-    private void shutdown() {
-        try {
-            logger.info("Shutting down Peer " + myPeerId);
-            
-            // Close all peer connections
-            for (Socket socket : peerConnections.values()) {
-                if (socket != null && !socket.isClosed()) {
-                    socket.close();
-                }
-            }
-            
-            // Close server socket
-            if (serverSocket != null && !serverSocket.isClosed()) {
-                serverSocket.close();
-            }
-            
-            // Shutdown thread pools
-            threadPool.shutdown();
-            if (scheduler != null) {
-                scheduler.shutdown();
-            }
-            
-            logger.info("Peer " + myPeerId + " shut down successfully");
-            
-        } catch (IOException e) {
-            logger.warning("Error during shutdown: " + e.getMessage());
+
+    private int pickPiece(Bitfield peerBf) {
+        List<Integer> candidates = myBitfield.getMissingPiecesFrom(peerBf);
+        Collections.shuffle(candidates);
+        // First: prefer pieces not requested from anyone
+        for (int p : candidates) {
+            if (!requestedPieces.contains(p)) return p;
         }
+        // Second: if all candidates are "requested" but the owner disconnected, re-request them
+        for (int p : candidates) {
+            Integer owner = requestedPieceOwners.get(p);
+            if (owner == null || !outputStreams.containsKey(owner)) {
+                requestedPieces.remove(p);
+                requestedPieceOwners.remove(p);
+                return p;
+            }
+        }
+        return -1;
     }
 
     private void startChokingSchedulers() {
         scheduler = Executors.newScheduledThreadPool(2);
-
-        scheduler.scheduleAtFixedRate(
-                this::updatePreferredNeighbors,
-                commonConfig.getUnchokingInterval(),
-                commonConfig.getUnchokingInterval(),
-                TimeUnit.SECONDS
-        );
-
-        scheduler.scheduleAtFixedRate(
-                this::updateOptimisticNeighbor,
-                commonConfig.getOptimisticUnchokingInterval(),
-                commonConfig.getOptimisticUnchokingInterval(),
-                TimeUnit.SECONDS
-        );
+        scheduler.scheduleAtFixedRate(this::updatePreferredNeighbors,
+                commonConfig.getUnchokingInterval(), commonConfig.getUnchokingInterval(), TimeUnit.SECONDS);
+        scheduler.scheduleAtFixedRate(this::updateOptimisticNeighbor,
+                commonConfig.getOptimisticUnchokingInterval(), commonConfig.getOptimisticUnchokingInterval(), TimeUnit.SECONDS);
     }
 
     private void updatePreferredNeighbors() {
         try {
             List<Integer> candidates = new ArrayList<>(interestedPeers);
-            if (candidates.isEmpty()) {
-                preferredNeighbors.clear();
-                applyChokingDecisions();
-                return;
-            }
+            if (candidates.isEmpty()) { preferredNeighbors.clear(); applyChokingDecisions(); return; }
 
-            int preferredCount = Math.min(commonConfig.getNumberOfPreferredNeighbors(), candidates.size());
-
+            int k = Math.min(commonConfig.getNumberOfPreferredNeighbors(), candidates.size());
             if (myBitfield.hasAllPieces()) {
                 Collections.shuffle(candidates);
             } else {
                 candidates.sort((a, b) -> Integer.compare(
                         bytesDownloadedByPeer.getOrDefault(b, 0),
-                        bytesDownloadedByPeer.getOrDefault(a, 0)
-                ));
-            }
-
-            Set<Integer> newPreferred = new HashSet<>();
-            for (int i = 0; i < preferredCount; i++) {
-                newPreferred.add(candidates.get(i));
+                        bytesDownloadedByPeer.getOrDefault(a, 0)));
             }
 
             preferredNeighbors.clear();
-            preferredNeighbors.addAll(newPreferred);
-
+            for (int i = 0; i < k; i++) preferredNeighbors.add(candidates.get(i));
             bytesDownloadedByPeer.clear();
             applyChokingDecisions();
 
-            logger.info("Peer " + myPeerId + " has the preferred neighbors " + joinNeighborIds(preferredNeighbors));
+            List<Integer> sorted = new ArrayList<>(preferredNeighbors);
+            Collections.sort(sorted);
+            logger.info("Peer " + myPeerId + " has the preferred neighbors " + sorted.toString().replaceAll("[\\[\\]]", ""));
         } catch (Exception e) {
-            logger.warning("Error updating preferred neighbors: " + e.getMessage());
+            logger.warning("updatePreferredNeighbors error: " + e.getMessage());
         }
     }
 
     private void updateOptimisticNeighbor() {
         try {
             List<Integer> candidates = new ArrayList<>();
-            for (int peerId : interestedPeers) {
-                if (!preferredNeighbors.contains(peerId)) {
-                    candidates.add(peerId);
-                }
+            for (int p : interestedPeers) {
+                if (!preferredNeighbors.contains(p) && iAmChokingPeer.getOrDefault(p, true)) candidates.add(p);
             }
-
-            if (candidates.isEmpty()) {
-                optimisticNeighbor = null;
-                applyChokingDecisions();
-                return;
-            }
-
             Collections.shuffle(candidates);
-            optimisticNeighbor = candidates.get(0);
+            optimisticNeighbor = candidates.isEmpty() ? null : candidates.get(0);
             applyChokingDecisions();
-
-            logger.info("Peer " + myPeerId + " has the optimistically unchoked neighbor " + optimisticNeighbor);
+            if (optimisticNeighbor != null)
+                logger.info("Peer " + myPeerId + " has the optimistically unchoked neighbor " + optimisticNeighbor);
         } catch (Exception e) {
-            logger.warning("Error updating optimistic neighbor: " + e.getMessage());
+            logger.warning("updateOptimisticNeighbor error: " + e.getMessage());
         }
     }
 
@@ -537,12 +378,9 @@ public class peerProcess {
         for (Map.Entry<Integer, DataOutputStream> entry : outputStreams.entrySet()) {
             int peerId = entry.getKey();
             DataOutputStream out = entry.getValue();
-
             boolean shouldUnchoke = preferredNeighbors.contains(peerId)
-                    || (optimisticNeighbor != null && optimisticNeighbor == peerId);
-
+                    || (optimisticNeighbor != null && optimisticNeighbor.equals(peerId));
             boolean currentlyChoking = iAmChokingPeer.getOrDefault(peerId, true);
-
             try {
                 if (shouldUnchoke && currentlyChoking) {
                     sendMessage(out, new Message(MessageType.UNCHOKE));
@@ -552,190 +390,107 @@ public class peerProcess {
                     iAmChokingPeer.put(peerId, true);
                 }
             } catch (IOException e) {
-                logger.warning("Failed to update choke state for Peer " + peerId + ": " + e.getMessage());
+                logger.warning("Choke/unchoke failed for Peer " + peerId + ": " + e.getMessage());
             }
-        }
-    }
-
-    private String joinNeighborIds(Set<Integer> neighbors) {
-        List<Integer> ids = new ArrayList<>(neighbors);
-        Collections.sort(ids);
-
-        StringBuilder sb = new StringBuilder();
-        for (int i = 0; i < ids.size(); i++) {
-            if (i > 0) {
-                sb.append(", ");
-            }
-            sb.append(ids.get(i));
-        }
-        return sb.toString();
-    }
-
-    private void handleRequestMessage(int peerId, Message message, DataOutputStream out) throws IOException {
-        if (iAmChokingPeer.getOrDefault(peerId, true)) {
-            return;
-        }
-
-        int requestedPiece = message.getPieceIndex();
-        byte[] pieceData = fileManager.readPiece(requestedPiece);
-
-        if (pieceData == null) {
-            logger.warning("Peer " + myPeerId + " received REQUEST for missing piece " + requestedPiece + " from Peer " + peerId);
-            return;
-        }
-
-        Message pieceMessage = Message.createPieceMessage(requestedPiece, pieceData);
-        sendMessage(out, pieceMessage);
-    }
-
-    private void handlePieceMessage(int peerId, Message message, DataOutputStream out) throws IOException {
-        int receivedPieceIndex = message.getPieceIndex();
-        byte[] pieceData = message.getPieceData();
-        bytesDownloadedByPeer.merge(peerId, pieceData.length, Integer::sum);
-        requestedPieces.remove(receivedPieceIndex);
-        requestedPieceOwners.remove(receivedPieceIndex);
-
-        boolean wasNewPiece = fileManager.writePiece(receivedPieceIndex, pieceData);
-        if (!wasNewPiece) {
-            maybeRequestNextPiece(peerId, out);
-            return;
-        }
-
-        myBitfield.setPiece(receivedPieceIndex);
-        logger.info("Peer " + myPeerId + " received the piece " + receivedPieceIndex + " from Peer " + peerId +
-                ". Now it has " + myBitfield.getPiecesOwned() + " pieces.");
-
-        broadcastHave(receivedPieceIndex);
-
-        if (myBitfield.hasAllPieces()) {
-            fileManager.writeFullFile();
-            logger.info("Peer " + myPeerId + " has downloaded the complete file");
-            completionLogged = true;
-            broadcastNotInterested();
-            return;
-        }
-
-        maybeRequestNextPiece(peerId, out);
-    }
-
-    private void maybeRequestNextPiece(int peerId, DataOutputStream out) throws IOException {
-        Boolean isChoking = peerChokingMe.get(peerId);
-        if (isChoking != null && isChoking) {
-            return;
-        }
-
-        Bitfield peerBitfield = peerBitfields.get(peerId);
-        if (peerBitfield == null) {
-            return;
-        }
-
-        int pieceToRequest = pickRequestablePiece(peerBitfield);
-        if (pieceToRequest == -1) {
-            Message notInterestedMessage = new Message(MessageType.NOT_INTERESTED);
-            sendMessage(out, notInterestedMessage);
-            return;
-        }
-
-        requestedPieces.add(pieceToRequest);
-        requestedPieceOwners.put(pieceToRequest, peerId);
-        Message requestMessage = Message.createRequestMessage(pieceToRequest);
-        sendMessage(out, requestMessage);
-        logger.info("Peer " + myPeerId + " requested piece " + pieceToRequest + " from Peer " + peerId);
-    }
-
-    private int pickRequestablePiece(Bitfield peerBitfield) {
-        List<Integer> missingPieces = myBitfield.getMissingPiecesFrom(peerBitfield);
-        if (missingPieces.isEmpty()) {
-            return -1;
-        }
-
-        Collections.shuffle(missingPieces);
-        for (int pieceIndex : missingPieces) {
-            if (!requestedPieces.contains(pieceIndex) && !requestedPieceOwners.containsKey(pieceIndex)) {
-                return pieceIndex;
-            }
-        }
-        return -1;
-    }
-
-    private void cleanupPeerConnection(int peerId) {
-        Socket socket = peerConnections.remove(peerId);
-        if (socket != null) {
-            try {
-                if (!socket.isClosed()) {
-                    socket.close();
-                }
-            } catch (IOException ignored) {
-            }
-        }
-
-        inputStreams.remove(peerId);
-        outputStreams.remove(peerId);
-        peerChokingMe.remove(peerId);
-        iAmChokingPeer.remove(peerId);
-        interestedPeers.remove(peerId);
-        peerBitfields.remove(peerId);
-        preferredNeighbors.remove(peerId);
-
-        if (optimisticNeighbor != null && optimisticNeighbor == peerId) {
-            optimisticNeighbor = null;
-        }
-
-        List<Integer> staleRequests = new ArrayList<>();
-        for (Map.Entry<Integer, Integer> entry : requestedPieceOwners.entrySet()) {
-            if (entry.getValue() == peerId) {
-                staleRequests.add(entry.getKey());
-            }
-        }
-
-        for (int pieceIndex : staleRequests) {
-            requestedPieceOwners.remove(pieceIndex);
-            requestedPieces.remove(pieceIndex);
         }
     }
 
     private void broadcastHave(int pieceIndex) {
-        Message haveMessage = Message.createHaveMessage(pieceIndex);
-        for (Map.Entry<Integer, DataOutputStream> entry : outputStreams.entrySet()) {
-            try {
-                sendMessage(entry.getValue(), haveMessage);
-            } catch (IOException e) {
-                logger.warning("Failed to send HAVE to Peer " + entry.getKey() + ": " + e.getMessage());
-            }
+        Message haveMsg = Message.createHaveMessage(pieceIndex);
+        for (Map.Entry<Integer, DataOutputStream> e : outputStreams.entrySet()) {
+            try { sendMessage(e.getValue(), haveMsg); }
+            catch (IOException ex) { logger.warning("HAVE broadcast failed to Peer " + e.getKey()); }
         }
     }
 
     private void broadcastNotInterested() {
-        Message notInterested = new Message(MessageType.NOT_INTERESTED);
-        for (Map.Entry<Integer, DataOutputStream> entry : outputStreams.entrySet()) {
-            try {
-                sendMessage(entry.getValue(), notInterested);
-            } catch (IOException e) {
-                logger.warning("Failed to send NOT_INTERESTED to Peer " + entry.getKey() + ": " + e.getMessage());
-            }
+        Message ni = new Message(MessageType.NOT_INTERESTED);
+        for (Map.Entry<Integer, DataOutputStream> e : outputStreams.entrySet()) {
+            try { sendMessage(e.getValue(), ni); }
+            catch (IOException ex) { /* ignore */ }
         }
     }
 
-    private void sendMessage(DataOutputStream out, Message message) throws IOException {
-        synchronized (out) {
-            message.send(out);
+    private synchronized void sendMessage(DataOutputStream out, Message msg) throws IOException {
+        synchronized (out) { msg.send(out); }
+    }
+
+    private void cleanupPeer(int peerId) {
+        try {
+            Socket s = peerConnections.remove(peerId);
+            if (s != null && !s.isClosed()) s.close();
+        } catch (IOException ignored) {}
+        outputStreams.remove(peerId);
+        inputStreams.remove(peerId);
+        peerChokingMe.remove(peerId);
+        iAmChokingPeer.remove(peerId);
+        interestedPeers.remove(peerId);
+        preferredNeighbors.remove(peerId);
+        if (Integer.valueOf(peerId).equals(optimisticNeighbor)) optimisticNeighbor = null;
+        List<Integer> stale = new ArrayList<>();
+        for (Map.Entry<Integer, Integer> e : requestedPieceOwners.entrySet())
+            if (e.getValue() == peerId) stale.add(e.getKey());
+        stale.forEach(p -> { requestedPieceOwners.remove(p); requestedPieces.remove(p); });
+    }
+
+    private boolean allPeersHaveCompleteFile() {
+        if (!myBitfield.hasAllPieces()) return false;
+        // Check all peers in config are accounted for as complete
+        for (PeerInfo pi : peerInfoConfig.getPeers()) {
+            if (pi.getPeerId() == myPeerId) continue;
+            int pid = pi.getPeerId();
+            // Already confirmed complete via HAVE messages or disconnect-after-complete
+            if (completedPeers.contains(pid)) continue;
+            // Still connected - check live bitfield
+            Bitfield bf = peerBitfields.get(pid);
+            if (bf == null || !bf.hasAllPieces()) return false;
+        }
+        return true;
+    }
+
+    public void start() {
+        try {
+            loadConfigurations();
+            initializeBitfield();
+            startServer();
+            Thread.sleep(500);
+            connectToPeers();
+            startChokingSchedulers();
+
+            while (true) {
+                Thread.sleep(1000);
+                if (allPeersHaveCompleteFile()) {
+                    logger.info("All peers have the complete file. Shutting down Peer " + myPeerId);
+                    shutdown();
+                    break;
+                }
+                if (myBitfield.hasAllPieces() && !completionLogged) {
+                    fileManager.writeFullFile();
+                    logger.info("Peer " + myPeerId + " has downloaded the complete file.");
+                    completionLogged = true;
+                }
+            }
+        } catch (Exception e) {
+            logger.severe("Fatal error: " + e.getMessage());
+            e.printStackTrace();
         }
     }
-    
-    public static void main(String[] args) {
-        if (args.length < 1) {
-            System.err.println("Usage: java peerProcess <peerID>");
-            System.exit(1);
-        }
-        
+
+    private void shutdown() {
         try {
-            int peerId = Integer.parseInt(args[0]);
-            peerProcess peer = new peerProcess(peerId);
-            peer.start();
-            
+            for (Socket s : peerConnections.values()) if (!s.isClosed()) s.close();
+            if (serverSocket != null && !serverSocket.isClosed()) serverSocket.close();
+            threadPool.shutdownNow();
+            if (scheduler != null) scheduler.shutdownNow();
+        } catch (IOException e) { logger.warning("Shutdown error: " + e.getMessage()); }
+    }
+
+    public static void main(String[] args) {
+        if (args.length < 1) { System.err.println("Usage: java peerProcess <peerID>"); System.exit(1); }
+        try {
+            new peerProcess(Integer.parseInt(args[0])).start();
         } catch (NumberFormatException e) {
-            System.err.println("Invalid peer ID: " + args[0]);
-            System.exit(1);
+            System.err.println("Invalid peer ID: " + args[0]); System.exit(1);
         }
     }
 }
