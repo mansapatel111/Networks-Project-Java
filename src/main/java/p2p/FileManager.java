@@ -7,7 +7,6 @@ import java.nio.file.Paths;
 
 public class FileManager {
 
-    private final int peerId;
     private final String fileName;
     private final int fileSize;
     private final int pieceSize;
@@ -21,7 +20,6 @@ public class FileManager {
 
     public FileManager(int peerId, String fileName, int fileSize, int pieceSize, int pieceCount, boolean startsWithFile)
             throws IOException {
-        this.peerId = peerId;
         this.fileName = fileName;
         this.fileSize = fileSize;
         this.pieceSize = pieceSize;

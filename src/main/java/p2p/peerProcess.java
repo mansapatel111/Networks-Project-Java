@@ -33,6 +33,7 @@ public class peerProcess {
     private final Set<Integer> interestedPeers;
     private final Map<Integer, Integer> bytesDownloadedByPeer;
     private final Set<Integer> requestedPieces;
+    private final Map<Integer, Integer> requestedPieceOwners;
     
     // Bitfields tracking what pieces each peer has
     private Bitfield myBitfield;
@@ -43,6 +44,7 @@ public class peerProcess {
     private ScheduledExecutorService scheduler;
     private final Set<Integer> preferredNeighbors;
     private volatile Integer optimisticNeighbor;
+    private volatile boolean completionLogged;
     
     // Logger
     private static Logger logger;
@@ -57,10 +59,12 @@ public class peerProcess {
         this.interestedPeers = ConcurrentHashMap.newKeySet();
         this.bytesDownloadedByPeer = new ConcurrentHashMap<>();
         this.requestedPieces = ConcurrentHashMap.newKeySet();
+        this.requestedPieceOwners = new ConcurrentHashMap<>();
         this.peerBitfields = new ConcurrentHashMap<>();
         this.threadPool = Executors.newCachedThreadPool();
         this.preferredNeighbors = ConcurrentHashMap.newKeySet();
         this.optimisticNeighbor = null;
+        this.completionLogged = false;
         
         // Initialize logger
         setupLogger();
@@ -121,6 +125,7 @@ public class peerProcess {
         
         if (hasFile) {
             logger.info("Peer " + myPeerId + " has the complete file");
+            completionLogged = true;
         } else {
             logger.info("Peer " + myPeerId + " does not have the file");
         }
@@ -295,6 +300,8 @@ public class peerProcess {
             }
         } catch (IOException e) {
             logger.info("Connection closed with Peer " + peerId + ": " + e.getMessage());
+        } finally {
+            cleanupPeerConnection(peerId);
         }
     }
     
@@ -344,7 +351,10 @@ public class peerProcess {
                 break;
                 
             case BITFIELD:
-                // Already handled during initial exchange
+                Bitfield updatedPeerBitfield = new Bitfield(commonConfig.getPieceCount(), message.getPayload());
+                peerBitfields.put(peerId, updatedPeerBitfield);
+                determineAndSendInterest(peerId, out);
+                maybeRequestNextPiece(peerId, out);
                 break;
         }
     }
@@ -385,9 +395,10 @@ public class peerProcess {
                     break;
                 }
 
-                if (myBitfield.hasAllPieces() && !fileManager.getPeerFilePath().toFile().exists()) {
+                if (myBitfield.hasAllPieces() && !completionLogged) {
                     fileManager.writeFullFile();
                     logger.info("Peer " + myPeerId + " has downloaded the complete file");
+                    completionLogged = true;
                 }
             }
             
@@ -582,6 +593,7 @@ public class peerProcess {
         byte[] pieceData = message.getPieceData();
         bytesDownloadedByPeer.merge(peerId, pieceData.length, Integer::sum);
         requestedPieces.remove(receivedPieceIndex);
+        requestedPieceOwners.remove(receivedPieceIndex);
 
         boolean wasNewPiece = fileManager.writePiece(receivedPieceIndex, pieceData);
         if (!wasNewPiece) {
@@ -598,6 +610,7 @@ public class peerProcess {
         if (myBitfield.hasAllPieces()) {
             fileManager.writeFullFile();
             logger.info("Peer " + myPeerId + " has downloaded the complete file");
+            completionLogged = true;
             broadcastNotInterested();
             return;
         }
@@ -624,6 +637,7 @@ public class peerProcess {
         }
 
         requestedPieces.add(pieceToRequest);
+        requestedPieceOwners.put(pieceToRequest, peerId);
         Message requestMessage = Message.createRequestMessage(pieceToRequest);
         sendMessage(out, requestMessage);
         logger.info("Peer " + myPeerId + " requested piece " + pieceToRequest + " from Peer " + peerId);
@@ -637,11 +651,47 @@ public class peerProcess {
 
         Collections.shuffle(missingPieces);
         for (int pieceIndex : missingPieces) {
-            if (!requestedPieces.contains(pieceIndex)) {
+            if (!requestedPieces.contains(pieceIndex) && !requestedPieceOwners.containsKey(pieceIndex)) {
                 return pieceIndex;
             }
         }
         return -1;
+    }
+
+    private void cleanupPeerConnection(int peerId) {
+        Socket socket = peerConnections.remove(peerId);
+        if (socket != null) {
+            try {
+                if (!socket.isClosed()) {
+                    socket.close();
+                }
+            } catch (IOException ignored) {
+            }
+        }
+
+        inputStreams.remove(peerId);
+        outputStreams.remove(peerId);
+        peerChokingMe.remove(peerId);
+        iAmChokingPeer.remove(peerId);
+        interestedPeers.remove(peerId);
+        peerBitfields.remove(peerId);
+        preferredNeighbors.remove(peerId);
+
+        if (optimisticNeighbor != null && optimisticNeighbor == peerId) {
+            optimisticNeighbor = null;
+        }
+
+        List<Integer> staleRequests = new ArrayList<>();
+        for (Map.Entry<Integer, Integer> entry : requestedPieceOwners.entrySet()) {
+            if (entry.getValue() == peerId) {
+                staleRequests.add(entry.getKey());
+            }
+        }
+
+        for (int pieceIndex : staleRequests) {
+            requestedPieceOwners.remove(pieceIndex);
+            requestedPieces.remove(pieceIndex);
+        }
     }
 
     private void broadcastHave(int pieceIndex) {
