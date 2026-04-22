@@ -19,6 +19,7 @@ public class peerProcess {
     private CommonConfig commonConfig;
     private PeerInfoConfig peerInfoConfig;
     private PeerInfo myPeerInfo;
+    private FileManager fileManager;
     
     // Server socket for accepting connections
     private ServerSocket serverSocket;
@@ -87,12 +88,22 @@ public class peerProcess {
     }
     
     // set up our bitfield based on whether we start with the file
-    private void initializeBitfield() {
+    private void initializeBitfield() throws IOException {
         int pieceCount = commonConfig.getPieceCount();
         boolean hasFile = myPeerInfo.hasFile();
+
+        fileManager = new FileManager(
+                myPeerId,
+                commonConfig.getFileName(),
+                commonConfig.getFileSize(),
+                commonConfig.getPieceSize(),
+                pieceCount,
+                hasFile
+        );
         
         myBitfield = new Bitfield(pieceCount, hasFile);
         logger.info("Initialized bitfield: " + myBitfield);
+        logger.info("Working directory for file pieces: " + fileManager.getPeerDirectory());
         
         if (hasFile) {
             logger.info("Peer " + myPeerId + " has the complete file");
