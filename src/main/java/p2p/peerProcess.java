@@ -28,6 +28,8 @@ public class peerProcess {
     private final Map<Integer, Socket> peerConnections;
     private final Map<Integer, DataOutputStream> outputStreams;
     private final Map<Integer, DataInputStream> inputStreams;
+    private final Map<Integer, Boolean> peerChokingMe;
+    private final Set<Integer> requestedPieces;
     
     // Bitfields tracking what pieces each peer has
     private Bitfield myBitfield;
@@ -45,6 +47,8 @@ public class peerProcess {
         this.peerConnections = new ConcurrentHashMap<>();
         this.outputStreams = new ConcurrentHashMap<>();
         this.inputStreams = new ConcurrentHashMap<>();
+        this.peerChokingMe = new ConcurrentHashMap<>();
+        this.requestedPieces = ConcurrentHashMap.newKeySet();
         this.peerBitfields = new ConcurrentHashMap<>();
         this.threadPool = Executors.newCachedThreadPool();
         
@@ -158,6 +162,7 @@ public class peerProcess {
             peerConnections.put(remotePeerId, socket);
             inputStreams.put(remotePeerId, in);
             outputStreams.put(remotePeerId, out);
+            peerChokingMe.put(remotePeerId, false);
             
             // Exchange bitfields
             exchangeBitfields(remotePeerId, in, out);
@@ -215,6 +220,7 @@ public class peerProcess {
             peerConnections.put(peerInfo.getPeerId(), socket);
             inputStreams.put(peerInfo.getPeerId(), in);
             outputStreams.put(peerInfo.getPeerId(), out);
+            peerChokingMe.put(peerInfo.getPeerId(), false);
             
             // Exchange bitfields
             exchangeBitfields(peerInfo.getPeerId(), in, out);
@@ -231,7 +237,7 @@ public class peerProcess {
     private void exchangeBitfields(int peerId, DataInputStream in, DataOutputStream out) throws IOException {
         // Send my bitfield
         Message bitfieldMessage = Message.createBitfieldMessage(myBitfield.toBytes());
-        bitfieldMessage.send(out);
+        sendMessage(out, bitfieldMessage);
         logger.info("Sent bitfield to Peer " + peerId);
         
         // Receive peer's bitfield
@@ -244,6 +250,7 @@ public class peerProcess {
             
             // Determine interest
             determineAndSendInterest(peerId, out);
+            maybeRequestNextPiece(peerId, out);
         }
     }
     
@@ -253,11 +260,11 @@ public class peerProcess {
         
         if (peerBitfield != null && peerBitfield.hasInterestingPiecesFor(myBitfield)) {
             Message interestedMessage = new Message(MessageType.INTERESTED);
-            interestedMessage.send(out);
+            sendMessage(out, interestedMessage);
             logger.info("Sent INTERESTED to Peer " + peerId);
         } else {
             Message notInterestedMessage = new Message(MessageType.NOT_INTERESTED);
-            notInterestedMessage.send(out);
+            sendMessage(out, notInterestedMessage);
             logger.info("Sent NOT_INTERESTED to Peer " + peerId);
         }
     }
@@ -281,17 +288,18 @@ public class peerProcess {
     private void processMessage(int peerId, Message message, DataOutputStream out) throws IOException {
         switch (message.getType()) {
             case CHOKE:
+                peerChokingMe.put(peerId, true);
                 logger.info("Peer " + myPeerId + " is choked by Peer " + peerId);
                 break;
                 
             case UNCHOKE:
+                peerChokingMe.put(peerId, false);
                 logger.info("Peer " + myPeerId + " is unchoked by Peer " + peerId);
-                // TODO: Request a piece if interested
+                maybeRequestNextPiece(peerId, out);
                 break;
                 
             case INTERESTED:
                 logger.info("Peer " + myPeerId + " received INTERESTED from Peer " + peerId);
-                // TODO: Update interested peers list for choking algorithm
                 break;
                 
             case NOT_INTERESTED:
@@ -308,16 +316,15 @@ public class peerProcess {
                 
                 // Re-evaluate interest
                 determineAndSendInterest(peerId, out);
+                maybeRequestNextPiece(peerId, out);
                 break;
                 
             case REQUEST:
-                // TODO: Send requested piece if peer is unchoked
+                handleRequestMessage(peerId, message, out);
                 break;
                 
             case PIECE:
-                // TODO: Save piece, update bitfield, send HAVE to all peers
-                int receivedPieceIndex = message.getPieceIndex();
-                logger.info("Peer " + myPeerId + " received the piece " + receivedPieceIndex + " from Peer " + peerId);
+                handlePieceMessage(peerId, message, out);
                 break;
                 
             case BITFIELD:
@@ -357,6 +364,11 @@ public class peerProcess {
                     logger.info("All peers have downloaded the complete file");
                     shutdown();
                     break;
+                }
+
+                if (myBitfield.hasAllPieces() && !fileManager.getPeerFilePath().toFile().exists()) {
+                    fileManager.writeFullFile();
+                    logger.info("Peer " + myPeerId + " has downloaded the complete file");
                 }
             }
             
@@ -408,6 +420,113 @@ public class peerProcess {
             
         } catch (IOException e) {
             logger.warning("Error during shutdown: " + e.getMessage());
+        }
+    }
+
+    private void handleRequestMessage(int peerId, Message message, DataOutputStream out) throws IOException {
+        int requestedPiece = message.getPieceIndex();
+        byte[] pieceData = fileManager.readPiece(requestedPiece);
+
+        if (pieceData == null) {
+            logger.warning("Peer " + myPeerId + " received REQUEST for missing piece " + requestedPiece + " from Peer " + peerId);
+            return;
+        }
+
+        Message pieceMessage = Message.createPieceMessage(requestedPiece, pieceData);
+        sendMessage(out, pieceMessage);
+    }
+
+    private void handlePieceMessage(int peerId, Message message, DataOutputStream out) throws IOException {
+        int receivedPieceIndex = message.getPieceIndex();
+        byte[] pieceData = message.getPieceData();
+        requestedPieces.remove(receivedPieceIndex);
+
+        boolean wasNewPiece = fileManager.writePiece(receivedPieceIndex, pieceData);
+        if (!wasNewPiece) {
+            maybeRequestNextPiece(peerId, out);
+            return;
+        }
+
+        myBitfield.setPiece(receivedPieceIndex);
+        logger.info("Peer " + myPeerId + " received the piece " + receivedPieceIndex + " from Peer " + peerId +
+                ". Now it has " + myBitfield.getPiecesOwned() + " pieces.");
+
+        broadcastHave(receivedPieceIndex);
+
+        if (myBitfield.hasAllPieces()) {
+            fileManager.writeFullFile();
+            logger.info("Peer " + myPeerId + " has downloaded the complete file");
+            broadcastNotInterested();
+            return;
+        }
+
+        maybeRequestNextPiece(peerId, out);
+    }
+
+    private void maybeRequestNextPiece(int peerId, DataOutputStream out) throws IOException {
+        Boolean isChoking = peerChokingMe.get(peerId);
+        if (isChoking != null && isChoking) {
+            return;
+        }
+
+        Bitfield peerBitfield = peerBitfields.get(peerId);
+        if (peerBitfield == null) {
+            return;
+        }
+
+        int pieceToRequest = pickRequestablePiece(peerBitfield);
+        if (pieceToRequest == -1) {
+            Message notInterestedMessage = new Message(MessageType.NOT_INTERESTED);
+            sendMessage(out, notInterestedMessage);
+            return;
+        }
+
+        requestedPieces.add(pieceToRequest);
+        Message requestMessage = Message.createRequestMessage(pieceToRequest);
+        sendMessage(out, requestMessage);
+        logger.info("Peer " + myPeerId + " requested piece " + pieceToRequest + " from Peer " + peerId);
+    }
+
+    private int pickRequestablePiece(Bitfield peerBitfield) {
+        List<Integer> missingPieces = myBitfield.getMissingPiecesFrom(peerBitfield);
+        if (missingPieces.isEmpty()) {
+            return -1;
+        }
+
+        Collections.shuffle(missingPieces);
+        for (int pieceIndex : missingPieces) {
+            if (!requestedPieces.contains(pieceIndex)) {
+                return pieceIndex;
+            }
+        }
+        return -1;
+    }
+
+    private void broadcastHave(int pieceIndex) {
+        Message haveMessage = Message.createHaveMessage(pieceIndex);
+        for (Map.Entry<Integer, DataOutputStream> entry : outputStreams.entrySet()) {
+            try {
+                sendMessage(entry.getValue(), haveMessage);
+            } catch (IOException e) {
+                logger.warning("Failed to send HAVE to Peer " + entry.getKey() + ": " + e.getMessage());
+            }
+        }
+    }
+
+    private void broadcastNotInterested() {
+        Message notInterested = new Message(MessageType.NOT_INTERESTED);
+        for (Map.Entry<Integer, DataOutputStream> entry : outputStreams.entrySet()) {
+            try {
+                sendMessage(entry.getValue(), notInterested);
+            } catch (IOException e) {
+                logger.warning("Failed to send NOT_INTERESTED to Peer " + entry.getKey() + ": " + e.getMessage());
+            }
+        }
+    }
+
+    private void sendMessage(DataOutputStream out, Message message) throws IOException {
+        synchronized (out) {
+            message.send(out);
         }
     }
     
