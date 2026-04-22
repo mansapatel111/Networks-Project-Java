@@ -29,6 +29,9 @@ public class peerProcess {
     private final Map<Integer, DataOutputStream> outputStreams;
     private final Map<Integer, DataInputStream> inputStreams;
     private final Map<Integer, Boolean> peerChokingMe;
+    private final Map<Integer, Boolean> iAmChokingPeer;
+    private final Set<Integer> interestedPeers;
+    private final Map<Integer, Integer> bytesDownloadedByPeer;
     private final Set<Integer> requestedPieces;
     
     // Bitfields tracking what pieces each peer has
@@ -38,6 +41,8 @@ public class peerProcess {
     // Thread management
     private final ExecutorService threadPool;
     private ScheduledExecutorService scheduler;
+    private final Set<Integer> preferredNeighbors;
+    private volatile Integer optimisticNeighbor;
     
     // Logger
     private static Logger logger;
@@ -48,9 +53,14 @@ public class peerProcess {
         this.outputStreams = new ConcurrentHashMap<>();
         this.inputStreams = new ConcurrentHashMap<>();
         this.peerChokingMe = new ConcurrentHashMap<>();
+        this.iAmChokingPeer = new ConcurrentHashMap<>();
+        this.interestedPeers = ConcurrentHashMap.newKeySet();
+        this.bytesDownloadedByPeer = new ConcurrentHashMap<>();
         this.requestedPieces = ConcurrentHashMap.newKeySet();
         this.peerBitfields = new ConcurrentHashMap<>();
         this.threadPool = Executors.newCachedThreadPool();
+        this.preferredNeighbors = ConcurrentHashMap.newKeySet();
+        this.optimisticNeighbor = null;
         
         // Initialize logger
         setupLogger();
@@ -163,6 +173,8 @@ public class peerProcess {
             inputStreams.put(remotePeerId, in);
             outputStreams.put(remotePeerId, out);
             peerChokingMe.put(remotePeerId, false);
+            iAmChokingPeer.put(remotePeerId, true);
+            sendMessage(out, new Message(MessageType.CHOKE));
             
             // Exchange bitfields
             exchangeBitfields(remotePeerId, in, out);
@@ -221,6 +233,8 @@ public class peerProcess {
             inputStreams.put(peerInfo.getPeerId(), in);
             outputStreams.put(peerInfo.getPeerId(), out);
             peerChokingMe.put(peerInfo.getPeerId(), false);
+            iAmChokingPeer.put(peerInfo.getPeerId(), true);
+            sendMessage(out, new Message(MessageType.CHOKE));
             
             // Exchange bitfields
             exchangeBitfields(peerInfo.getPeerId(), in, out);
@@ -300,10 +314,12 @@ public class peerProcess {
                 
             case INTERESTED:
                 logger.info("Peer " + myPeerId + " received INTERESTED from Peer " + peerId);
+                interestedPeers.add(peerId);
                 break;
                 
             case NOT_INTERESTED:
                 logger.info("Peer " + myPeerId + " received NOT_INTERESTED from Peer " + peerId);
+                interestedPeers.remove(peerId);
                 break;
                 
             case HAVE:
@@ -352,6 +368,9 @@ public class peerProcess {
             
             // Connect to peers that appear before this peer in the config
             connectToPeers();
+
+            // Run preferred/optimistic neighbor selection tasks
+            startChokingSchedulers();
             
             logger.info("Peer " + myPeerId + " started successfully");
             
@@ -423,7 +442,129 @@ public class peerProcess {
         }
     }
 
+    private void startChokingSchedulers() {
+        scheduler = Executors.newScheduledThreadPool(2);
+
+        scheduler.scheduleAtFixedRate(
+                this::updatePreferredNeighbors,
+                commonConfig.getUnchokingInterval(),
+                commonConfig.getUnchokingInterval(),
+                TimeUnit.SECONDS
+        );
+
+        scheduler.scheduleAtFixedRate(
+                this::updateOptimisticNeighbor,
+                commonConfig.getOptimisticUnchokingInterval(),
+                commonConfig.getOptimisticUnchokingInterval(),
+                TimeUnit.SECONDS
+        );
+    }
+
+    private void updatePreferredNeighbors() {
+        try {
+            List<Integer> candidates = new ArrayList<>(interestedPeers);
+            if (candidates.isEmpty()) {
+                preferredNeighbors.clear();
+                applyChokingDecisions();
+                return;
+            }
+
+            int preferredCount = Math.min(commonConfig.getNumberOfPreferredNeighbors(), candidates.size());
+
+            if (myBitfield.hasAllPieces()) {
+                Collections.shuffle(candidates);
+            } else {
+                candidates.sort((a, b) -> Integer.compare(
+                        bytesDownloadedByPeer.getOrDefault(b, 0),
+                        bytesDownloadedByPeer.getOrDefault(a, 0)
+                ));
+            }
+
+            Set<Integer> newPreferred = new HashSet<>();
+            for (int i = 0; i < preferredCount; i++) {
+                newPreferred.add(candidates.get(i));
+            }
+
+            preferredNeighbors.clear();
+            preferredNeighbors.addAll(newPreferred);
+
+            bytesDownloadedByPeer.clear();
+            applyChokingDecisions();
+
+            logger.info("Peer " + myPeerId + " has the preferred neighbors " + joinNeighborIds(preferredNeighbors));
+        } catch (Exception e) {
+            logger.warning("Error updating preferred neighbors: " + e.getMessage());
+        }
+    }
+
+    private void updateOptimisticNeighbor() {
+        try {
+            List<Integer> candidates = new ArrayList<>();
+            for (int peerId : interestedPeers) {
+                if (!preferredNeighbors.contains(peerId)) {
+                    candidates.add(peerId);
+                }
+            }
+
+            if (candidates.isEmpty()) {
+                optimisticNeighbor = null;
+                applyChokingDecisions();
+                return;
+            }
+
+            Collections.shuffle(candidates);
+            optimisticNeighbor = candidates.get(0);
+            applyChokingDecisions();
+
+            logger.info("Peer " + myPeerId + " has the optimistically unchoked neighbor " + optimisticNeighbor);
+        } catch (Exception e) {
+            logger.warning("Error updating optimistic neighbor: " + e.getMessage());
+        }
+    }
+
+    private void applyChokingDecisions() {
+        for (Map.Entry<Integer, DataOutputStream> entry : outputStreams.entrySet()) {
+            int peerId = entry.getKey();
+            DataOutputStream out = entry.getValue();
+
+            boolean shouldUnchoke = preferredNeighbors.contains(peerId)
+                    || (optimisticNeighbor != null && optimisticNeighbor == peerId);
+
+            boolean currentlyChoking = iAmChokingPeer.getOrDefault(peerId, true);
+
+            try {
+                if (shouldUnchoke && currentlyChoking) {
+                    sendMessage(out, new Message(MessageType.UNCHOKE));
+                    iAmChokingPeer.put(peerId, false);
+                } else if (!shouldUnchoke && !currentlyChoking) {
+                    sendMessage(out, new Message(MessageType.CHOKE));
+                    iAmChokingPeer.put(peerId, true);
+                }
+            } catch (IOException e) {
+                logger.warning("Failed to update choke state for Peer " + peerId + ": " + e.getMessage());
+            }
+        }
+    }
+
+    private String joinNeighborIds(Set<Integer> neighbors) {
+        List<Integer> ids = new ArrayList<>(neighbors);
+        Collections.sort(ids);
+
+        StringBuilder sb = new StringBuilder();
+        for (int i = 0; i < ids.size(); i++) {
+            if (i > 0) {
+                sb.append(", ");
+            }
+            sb.append(ids.get(i));
+        }
+        return sb.toString();
+    }
+
     private void handleRequestMessage(int peerId, Message message, DataOutputStream out) throws IOException {
+        if (iAmChokingPeer.getOrDefault(peerId, true)) {
+            return;
+        }
+
         int requestedPiece = message.getPieceIndex();
         byte[] pieceData = fileManager.readPiece(requestedPiece);
 
@@ -439,6 +580,7 @@ public class peerProcess {
     private void handlePieceMessage(int peerId, Message message, DataOutputStream out) throws IOException {
         int receivedPieceIndex = message.getPieceIndex();
         byte[] pieceData = message.getPieceData();
+        bytesDownloadedByPeer.merge(peerId, pieceData.length, Integer::sum);
         requestedPieces.remove(receivedPieceIndex);
 
         boolean wasNewPiece = fileManager.writePiece(receivedPieceIndex, pieceData);
